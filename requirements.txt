@@ -1,0 +1,14 @@
+PyQt6
+rasterio
+pyshp
+pyproj
+shapely
+numpy
+pillow
+
+# TCS module: only needed to load a real trained YOLO .pt model (tcs/inference.py).
+# Without ultralytics/torch installed, TCS still runs end-to-end using the
+# built-in placeholder tree detector. Left commented so the small distributable
+# build stays light; install these in the .venv to use the bundled YOLO model.
+# ultralytics
+# torch
