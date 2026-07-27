@@ -38,7 +38,9 @@ Aplikasi desktop (Windows) untuk membuka data raster/vector sekaligus menghitung
 
 Hasil TCS (titik pohon maupun titik lahan kosong) adalah layer vector titik biasa, sehingga bisa langsung diekspor ke GeoJSON atau Shapefile lewat menu Export yang sama seperti file vector lainnya.
 
-Model deteksi bawaan (`models/*.onnx`) dijalankan lewat `onnxruntime` (CPU-only, ringan, ±15-20 MB) - selalu tersedia begitu dependency ter-install, tanpa perlu setup tambahan, dan tanpa perlu install framework machine learning besar apa pun secara terpisah. Jika file model tidak ditemukan, TCS tetap berjalan memakai *placeholder detector* bawaan (berbasis indeks vegetasi) supaya seluruh alur aplikasi tetap bisa dicoba.
+### Model deteksi
+
+Model deteksi bawaan TCS (`models/tcs_palm_detector.onnx`) berbasis arsitektur **YOLOv8 (varian nano/"n")**, dilatih khusus untuk satu kelas objek: kanopi pohon sawit dilihat dari atas (citra udara/orthophoto). Model hasil training ini diekspor ke format **ONNX** dan dijalankan lewat `onnxruntime` (CPU-only, ringan, ±15-20 MB) - sehingga aplikasi yang sudah dibundel tidak perlu meng-install PyTorch/Ultralytics atau framework machine learning besar apa pun saat runtime, cukup `onnxruntime`. Input citra diresize ke 1280x1280 (skala yang dipakai saat training) sebelum masuk ke model, dan output-nya berupa kotak deteksi + skor keyakinan yang lalu difilter dengan confidence threshold serta *Non-Maximum Suppression* (lihat [Alur Kerja Aplikasi](#alur-kerja-aplikasi)). Jika file model tidak ditemukan, TCS tetap berjalan memakai *placeholder detector* bawaan (berbasis indeks vegetasi) supaya seluruh alur aplikasi tetap bisa dicoba.
 
 ## Bahasa dan Teknologi yang Digunakan
 
@@ -54,7 +56,7 @@ TCS ditulis seluruhnya dalam **Python 3** (dikembangkan/diuji dengan Python 3.11
 | **Pillow (PIL)** | Baca/tulis gambar biasa (JPG/PNG tanpa GDAL), serta resize tile citra ke ukuran input model deteksi. |
 | **pyshp** | Baca/tulis Shapefile murni Python, tanpa perlu GDAL/Fiona - mengecilkan ukuran instalasi secara signifikan. |
 | **ezdxf** | Baca file DXF (CAD) murni Python, tanpa perlu driver GDAL/OGR DXF. |
-| **onnxruntime** | Menjalankan model deteksi objek (format ONNX) di CPU untuk modul TCS, tanpa memerlukan framework machine learning berukuran besar saat runtime. |
+| **onnxruntime** | Menjalankan model deteksi objek YOLOv8 (hasil training, diekspor ke format ONNX) di CPU untuk modul TCS, tanpa memerlukan PyTorch/Ultralytics saat runtime - lihat [Model deteksi](#model-deteksi). |
 
 Alat bantu developer (tidak termasuk di repo ini, lihat [Build EXE/Installer](#build-exeinstaller-developer-tidak-termasuk-repo-ini)): **PyInstaller** (membundel aplikasi Python menjadi EXE mandiri) dan **Inno Setup** (membuat installer Windows).
 
@@ -84,7 +86,7 @@ TCS_NEW/
     ├── panel.py                 # Dock panel UI: pilih raster, slider confidence, tombol Run/Cari Lahan Kosong
     ├── config.py                 # Nilai default (ukuran tile, confidence, IoU, dsb.)
     ├── tiling.py                  # Membagi raster besar menjadi tile-tile yang saling overlap
-    ├── inference.py                # Abstraksi TreeDetector + backend OnnxTreeDetector & PlaceholderTreeDetector
+    ├── inference.py                # Abstraksi TreeDetector + backend OnnxTreeDetector (model YOLOv8 -> ONNX) & PlaceholderTreeDetector
     ├── model_registry.py            # Menemukan model *.onnx yang dibundel + memilih yang paling akurat
     ├── worker.py                     # QThread: pipeline tiling -> deteksi -> filter/NMS -> titik geografis
     ├── postprocess.py                 # NMS lintas-tile, konversi bbox -> titik ber-georeferensi, simpan hasil
