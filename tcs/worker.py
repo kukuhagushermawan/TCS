@@ -85,15 +85,20 @@ class TCSWorker(QThread):
         for i, window in enumerate(windows):
             tile = extract_tile(self.raster_rgb, window, self.tile_size)
             for det in detector.detect_tile(tile):
-                raw_detections.append(
-                    Detection(
-                        x1=det.x1 + window.col_off,
-                        y1=det.y1 + window.row_off,
-                        x2=det.x2 + window.col_off,
-                        y2=det.y2 + window.row_off,
-                        confidence=det.confidence,
-                    )
-                )
+                x1, y1 = det.x1 + window.col_off, det.y1 + window.row_off
+                x2, y2 = det.x2 + window.col_off, det.y2 + window.row_off
+                # Clip to the raster's real pixel bounds. extract_tile() pads
+                # a non-square raster out to a square tile_size (see
+                # tiling.py), so a detection can land partly or fully inside
+                # that zero-padded margin; clipping (and dropping boxes left
+                # with no real area) keeps every surviving detection's
+                # coordinates inside the actual image before they are
+                # converted to world coordinates.
+                x1, x2 = max(0.0, min(x1, width)), max(0.0, min(x2, width))
+                y1, y2 = max(0.0, min(y1, height)), max(0.0, min(y2, height))
+                if x2 - x1 <= 0 or y2 - y1 <= 0:
+                    continue
+                raw_detections.append(Detection(x1=x1, y1=y1, x2=x2, y2=y2, confidence=det.confidence))
             self.progress.emit(int((i + 1) / total * 60), f"Inference tile {i + 1}/{total}")
         t2 = time.time()
         self.log.emit(f"Inference: {t2 - t1:.2f}s, {len(raw_detections)} deteksi mentah (sebelum filter/NMS)")

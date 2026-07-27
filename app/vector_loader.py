@@ -1,17 +1,15 @@
-"""Vector loaders for SHP, KML, KMZ, and GeoJSON.
+"""Vector loaders for SHP, KML, KMZ, GeoJSON, and DXF.
 
-Uses pyshp (pure Python, no GDAL) for Shapefile and the stdlib json module
-for GeoJSON, so the core app does not need to bundle a private GDAL copy
-just to open vector data. DXF is not supported here - it needs GDAL's DXF
-driver, which is only available through the optional GDAL runtime (see
-app/gdal_runtime_dialog.py); a DXF file raises a clear message instead of
-silently failing or crashing.
+Uses pyshp (pure Python, no GDAL) for Shapefile, the stdlib json module for
+GeoJSON, and ezdxf (pure Python, no GDAL) for DXF, so the core app does not
+need to bundle a private GDAL copy just to open vector data.
 """
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 import zipfile
 import tempfile
 import xml.etree.ElementTree as ET
@@ -36,12 +34,7 @@ def load_vector(path: str) -> Layer:
     if suffix == ".shp":
         return _load_shapefile(path)
     if suffix == ".dxf":
-        raise RuntimeError(
-            "Format DXF membutuhkan GDAL runtime tambahan.\n\n"
-            "Gunakan menu Open Raster/Open Vector setelah memilih GDAL runtime "
-            "yang mendukung DXF (misalnya OSGeo4W/QGIS), atau konversi DXF ke "
-            "SHP/GeoJSON terlebih dahulu dengan QGIS."
-        )
+        return _load_dxf(path)
     raise RuntimeError(f"Format vector belum didukung: {suffix}")
 
 
@@ -72,13 +65,158 @@ def _load_shapefile(path: str) -> Layer:
 
 
 def _read_shapefile_crs(path: Path):
-    prj_path = path.with_suffix(".prj")
+    return read_sidecar_prj(path)
+
+
+def read_sidecar_prj(path: Path) -> Optional[str]:
+    """Read a companion ``<name>.prj`` WKT file next to any vector/raster file.
+
+    Shapefile always carries its CRS this way, but the same ``.prj`` sidecar
+    convention is also used by some tools for DXF exports (e.g. Global
+    Mapper/QGIS) and for georeferenced images (worldfile + .prj pairs), so
+    every loader that gets a bare/no-CRS format checks here before giving up.
+    """
+    prj_path = Path(path).with_suffix(".prj")
     if prj_path.exists():
         try:
-            return prj_path.read_text(encoding="utf-8", errors="ignore").strip()
+            text = prj_path.read_text(encoding="utf-8", errors="ignore").strip()
+            return text or None
         except Exception:
             return None
     return None
+
+
+def geojson_crs_to_string(data: Dict[str, Any]) -> str:
+    """Resolve a GeoJSON object's legacy ``"crs"`` member to a CRS string.
+
+    Defaults to EPSG:4326 (the RFC 7946 assumption) when no ``"crs"`` member
+    is present, but honors an explicit legacy member (still produced by some
+    GIS export tools) instead of silently overriding it.
+    """
+    crs_member = data.get("crs")
+    if not isinstance(crs_member, dict):
+        return "EPSG:4326"
+    props = crs_member.get("properties")
+    name = props.get("name") if isinstance(props, dict) else None
+    if not name and isinstance(props, dict):
+        name = props.get("code")
+    if not name:
+        return "EPSG:4326"
+    name = str(name)
+    if "CRS84" in name.upper():
+        # OGC CRS84 is WGS84 in lon,lat order - the same order GeoJSON already uses.
+        return "EPSG:4326"
+    match = re.search(r"EPSG[:]{1,2}(\d+)", name, re.IGNORECASE)
+    if match:
+        return f"EPSG:{match.group(1)}"
+    if name.upper().startswith("EPSG:"):
+        return name.upper()
+    return name
+
+
+# ---------------------------------------------------------------------------
+# DXF (ezdxf - pure Python, no GDAL/OGR DXF driver needed)
+# ---------------------------------------------------------------------------
+
+# Flattening tolerance (drawing units) for approximating curved entities
+# (ARC/CIRCLE/ELLIPSE/SPLINE/bulged LWPOLYLINE) as straight-line vertices -
+# our internal geometry model only knows Point/LineString/Polygon, the same
+# limitation GeoJSON/Shapefile have. 0.1 gives a visually smooth boundary for
+# typical plantation/survey-scale drawings (meters) without excessive points.
+_DXF_FLATTEN_SAGITTA = 0.1
+
+
+def _load_dxf(path: str) -> Layer:
+    features = read_dxf_features(path)
+    bounds = _feature_bounds(features)
+    return Layer(
+        name=Path(path).name,
+        layer_type="vector",
+        path=path,
+        features=features,
+        # DXF itself has no standard CRS tag (unlike Shapefile's .prj or
+        # KML's fixed WGS84) - coordinates are just raw drawing units. Some
+        # export tools (Global Mapper, QGIS DXF export) still drop a
+        # companion .prj next to the .dxf, so check for that before giving up.
+        crs=read_sidecar_prj(Path(path)),
+        bounds=bounds,
+        source_driver="DXF (ezdxf)",
+        metadata={"feature_count": len(features)},
+    )
+
+
+def read_dxf_features(path: str) -> List[Dict[str, Any]]:
+    """Flatten every drawable DXF entity - including entities inside INSERT
+    block references, fully transformed - into plain Point/LineString/Polygon
+    features, so DXF opens/converts through the same feature-dict shape as
+    every other vector format here. Shared by format_converter.read_vector_features
+    so DXF can also be exported once opened.
+    """
+    try:
+        import ezdxf
+        from ezdxf import path as ezpath
+    except Exception as exc:  # pragma: no cover
+        raise RuntimeError("ezdxf belum tersedia untuk membuka DXF.") from exc
+
+    try:
+        doc = ezdxf.readfile(path)
+    except Exception as exc:
+        raise RuntimeError(f"Gagal membaca DXF: {exc}") from exc
+
+    features: List[Dict[str, Any]] = []
+    for entity in _iter_dxf_entities(doc.modelspace()):
+        feat = _dxf_entity_to_feature(entity, ezpath, len(features) + 1)
+        if feat is not None:
+            features.append(feat)
+    return features
+
+
+def _iter_dxf_entities(layout):
+    """Yield drawable entities, resolving INSERT block references into their
+    already-transformed virtual entities (recursively - a block can itself
+    contain nested INSERTs) instead of the untransformed block definition."""
+    for entity in layout:
+        if entity.dxftype() == "INSERT":
+            yield from _iter_dxf_entities(entity.virtual_entities())
+        else:
+            yield entity
+
+
+def _dxf_entity_to_feature(entity, ezpath, feature_id: int) -> Optional[Dict[str, Any]]:
+    dxftype = entity.dxftype()
+    props = {"entity_type": dxftype, "layer": entity.dxf.layer}
+
+    if dxftype == "POINT":
+        loc = entity.dxf.location
+        return {
+            "type": "Feature", "id": str(feature_id), "properties": props,
+            "geometry": {"type": "Point", "coordinates": [loc.x, loc.y]},
+        }
+
+    try:
+        flattened_path = ezpath.make_path(entity)
+    except TypeError:
+        # TEXT/MTEXT/HATCH/DIMENSION/3DFACE/... - not a line/curve geometry,
+        # skip rather than fail the whole file over one unsupported entity.
+        return None
+    verts = [(v.x, v.y) for v in flattened_path.flattening(_DXF_FLATTEN_SAGITTA)]
+    if len(verts) < 2:
+        return None
+
+    # CIRCLE/ELLIPSE are always closed loops; LWPOLYLINE/POLYLINE report their
+    # own closed state. ezdxf's own flattening already repeats the first
+    # vertex at the end for closed entities - the explicit check here is a
+    # cheap safeguard in case a future entity type doesn't.
+    is_closed = dxftype in {"CIRCLE", "ELLIPSE"} or bool(getattr(entity, "closed", False)) or bool(getattr(entity, "is_closed", False))
+    if is_closed:
+        if verts[0] != verts[-1]:
+            verts.append(verts[0])
+        if len(verts) < 4:
+            return None
+        geometry = {"type": "Polygon", "coordinates": [[list(v) for v in verts]]}
+    else:
+        geometry = {"type": "LineString", "coordinates": [list(v) for v in verts]}
+    return {"type": "Feature", "id": str(feature_id), "properties": props, "geometry": geometry}
 
 
 def _load_geojson(path: str) -> Layer:
@@ -106,7 +244,7 @@ def _load_geojson(path: str) -> Layer:
         layer_type="vector",
         path=path,
         features=features,
-        crs="EPSG:4326",
+        crs=geojson_crs_to_string(data),
         bounds=bounds,
         source_driver="GeoJSON",
         metadata={"feature_count": len(features)},

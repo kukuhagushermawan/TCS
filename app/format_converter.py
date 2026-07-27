@@ -8,9 +8,9 @@ Important design choices:
   core app does not need to bundle a private GDAL copy just for Shapefiles -
   Fiona and rasterio each vendor their own GDAL/PROJ/spatialite build, which
   was the single largest source of installer bloat.
-- DXF is not supported here - it needs GDAL's DXF driver. See
-  app/gdal_runtime_dialog.py for the optional GDAL runtime this project uses
-  instead of bundling OSGeo4W into the installer.
+- DXF is read via ezdxf (pure Python, no GDAL/OGR DXF driver needed) - see
+  app.vector_loader.read_dxf_features, shared by the vector loader and this
+  module's conversion path.
 - ECW/IMG raster conversion uses rasterio when available and falls back to OSGeo4W/QGIS gdal_translate.
 """
 from __future__ import annotations
@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from .resources import resource_path
-from .vector_loader import iter_geometry_parts
+from .vector_loader import geojson_crs_to_string, iter_geometry_parts, read_sidecar_prj
 
 try:
     import rasterio
@@ -339,10 +339,9 @@ def read_vector_features(input_path: str) -> Tuple[List[Dict[str, Any]], Optiona
     if ext == ".shp":
         return _read_shapefile_features(input_path)
     if ext == ".dxf":
-        raise RuntimeError(
-            "Format DXF membutuhkan GDAL runtime tambahan. Konversi DXF ke SHP/GeoJSON "
-            "terlebih dahulu dengan QGIS, atau pilih GDAL runtime lewat dialog ECW."
-        )
+        from .vector_loader import read_dxf_features
+
+        return read_dxf_features(input_path), read_sidecar_prj(Path(input_path))
     raise RuntimeError(f"Format vector belum didukung: {ext}")
 
 
@@ -357,7 +356,7 @@ def _read_geojson_features(input_path: str) -> Tuple[List[Dict[str, Any]], Optio
             continue
         props = _plain_properties(feat.get("properties") or {})
         features.append({"type": "Feature", "id": str(feat.get("id", i)), "properties": props, "geometry": geom})
-    return features, "EPSG:4326"
+    return features, geojson_crs_to_string(data)
 
 
 def _read_shapefile_features(input_path: str) -> Tuple[List[Dict[str, Any]], Optional[Any]]:
@@ -374,8 +373,7 @@ def _read_shapefile_features(input_path: str) -> Tuple[List[Dict[str, Any]], Opt
                 continue
             props = _plain_properties(dict(zip(field_names, shape_rec.record)))
             features.append({"type": "Feature", "id": str(i), "properties": props, "geometry": geom})
-    prj_path = Path(input_path).with_suffix(".prj")
-    source_crs = prj_path.read_text(encoding="utf-8", errors="ignore").strip() if prj_path.exists() else None
+    source_crs = read_sidecar_prj(Path(input_path))
     return features, source_crs
 
 

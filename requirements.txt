@@ -6,6 +6,9 @@ shapely
 numpy
 pillow
 
+# DXF reader (app/vector_loader.py) - pure Python, no GDAL/OGR DXF driver needed.
+ezdxf
+
 # TCS module: runs the bundled detection model (models/*.onnx) via
 # onnxruntime (CPU-only, ~15-20 MB) - no PyTorch/other large ML framework
 # needed, so the app runs fully self-contained out of the box.

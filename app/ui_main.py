@@ -339,15 +339,30 @@ class TCSMainWindow(QMainWindow):
         self.tcs_panel.raise_()
         self.tcs_panel.activateWindow()
 
-    def add_tcs_result_layer(self, layer: Layer, source_layer_id: Optional[str] = None) -> None:
-        """Show a TCS counting result (a vector layer of detected-tree boxes) as
-        its own document window, exactly like opening any other vector file."""
+    def add_tcs_result_layer(self, layer: Layer) -> None:
+        """Show a TCS result (tree points, later possibly amended in place
+        with empty-land crosses via ``refresh_layer_window``) as its own
+        standalone vector document window - exactly like opening any other
+        vector file, kept deliberately separate from the source raster's
+        own window."""
         self._add_layer(layer)
 
+    def refresh_layer_window(self, layer_id: str) -> None:
+        """Redraw whichever open window currently shows ``layer_id`` - used
+        after TCS mutates an already-open result layer's features in place
+        (Cari Lahan Kosong appends empty-slot points to the existing
+        tree-count result rather than opening a second window), so the
+        change becomes visible without opening anything new."""
+        for canvas in self._popup_canvases:
+            if any(lyr.id == layer_id for lyr in canvas.layer_manager.layers):
+                canvas.redraw()
+                return
+
     def remove_layer_by_id(self, layer_id: str) -> None:
-        """Close the document window that holds ``layer_id`` (used when a TCS
-        preview is discarded). Closing the window removes its layers via
-        ``_on_popup_dialog_closed``; falls back to a direct removal otherwise."""
+        """Close the standalone document window that holds ``layer_id``
+        (used when a TCS preview is discarded). Closing the window removes
+        its layer via ``_on_popup_dialog_closed``; falls back to a direct
+        registry removal otherwise."""
         for dialog, canvases in list(self._dialog_canvases.items()):
             if any(any(lyr.id == layer_id for lyr in c.layer_manager.layers) for c in canvases):
                 dialog.close()

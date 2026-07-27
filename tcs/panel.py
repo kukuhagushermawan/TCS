@@ -38,6 +38,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
 )
 
+from app.coordinate_tools import pixel_to_world
 from app.layer_manager import Layer
 from app.resources import resource_path
 
@@ -284,7 +285,7 @@ class TCSPanel(QDialog):
             crs=source_layer.crs if source_layer else None,
             bounds=feature_bounds(features),
             source_driver="TCS",
-            metadata={"tcs_total": len(features)},
+            metadata={"tcs_total": len(features), "tcs_style": "tree"},
         )
         self._pending_layer = preview_layer
         self._pending_features = features
@@ -321,6 +322,7 @@ class TCSPanel(QDialog):
                 boundary_layer = next((lyr for lyr in candidates if lyr.name == choice), None)
 
         tree_crs = self._pending_layer.crs if self._pending_layer else None
+        raster_bounds = self._source_raster_world_bounds()
         self.gap_btn.setEnabled(False)
         self.status_label.setText("Mencari lahan kosong...")
 
@@ -328,6 +330,7 @@ class TCSPanel(QDialog):
             tree_features=self._pending_features,
             tree_crs=tree_crs,
             boundary_layer=boundary_layer,
+            raster_bounds=raster_bounds,
         )
         self._gap_worker.progress.connect(self._on_gap_progress)
         self._gap_worker.finished_ok.connect(self._on_gap_finished)
@@ -338,6 +341,24 @@ class TCSPanel(QDialog):
         self.progress_bar.setValue(percent)
         self.progress_bar.setFormat(f"{percent}% - {message}")
 
+    def _source_raster_world_bounds(self):
+        """Real-world bounding box (minx, miny, maxx, maxy) of the raster
+        that was used for counting - lets gap analysis drop candidates too
+        close to the captured image's own edge (see
+        gap_analysis.filter_within_raster_margin)."""
+        layer = self._pending_source_layer
+        if layer is None or layer.transform is None or not layer.width or not layer.height:
+            return None
+        corners = [
+            pixel_to_world(layer.transform, 0, 0),
+            pixel_to_world(layer.transform, layer.width, 0),
+            pixel_to_world(layer.transform, layer.width, layer.height),
+            pixel_to_world(layer.transform, 0, layer.height),
+        ]
+        xs = [c[0] for c in corners]
+        ys = [c[1] for c in corners]
+        return (min(xs), min(ys), max(xs), max(ys))
+
     def _on_gap_finished(self, features: list, spacing: float, boundary_source: str) -> None:
         self.gap_btn.setEnabled(True)
         if not features:
@@ -345,18 +366,22 @@ class TCSPanel(QDialog):
                 self, "TCS", f"Tidak ditemukan lahan kosong (estimasi jarak tanam {spacing:.1f})."
             )
             return
-        timestamp = datetime.now().strftime("%H%M%S")
-        gap_layer = Layer(
-            name=f"TCS_lahan_kosong_{timestamp} - {len(features)} titik",
-            layer_type="vector",
-            path=None,
-            features=features,
-            crs=self._pending_layer.crs if self._pending_layer else None,
-            bounds=feature_bounds(features),
-            source_driver="TCS",
-            metadata={"tcs_gap_total": len(features), "spacing": spacing},
-        )
-        self.main_window.add_tcs_result_layer(gap_layer)
+        if self._pending_layer is None or self._pending_features is None:
+            # The counting result was saved/discarded while this ran in the
+            # background - nothing left to attach the gap points to.
+            return
+
+        # Append into the SAME vector layer/window the tree points already
+        # opened in, rather than creating a second layer - the empty-slot
+        # crosses show up as an addition to that one result, not a
+        # separate document. save_features() (Simpan) then also carries
+        # both tree and gap points together.
+        self._pending_features = self._pending_features + features
+        self._pending_layer.features = self._pending_features
+        self._pending_layer.bounds = feature_bounds(self._pending_layer.features)
+        self._pending_layer.metadata["tcs_gap_total"] = len(features)
+        self._pending_layer.metadata["spacing"] = spacing
+        self.main_window.refresh_layer_window(self._pending_layer.id)
         self.status_label.setText(
             f"Ditemukan {len(features)} titik lahan kosong (estimasi jarak tanam {spacing:.1f}, {boundary_source})."
         )

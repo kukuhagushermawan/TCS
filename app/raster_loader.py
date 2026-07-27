@@ -10,6 +10,7 @@ from PIL import Image
 
 from .layer_manager import Layer
 from .image_enhancement import to_uint8_rgb
+from .vector_loader import read_sidecar_prj
 
 try:
     import rasterio
@@ -155,6 +156,11 @@ def _load_with_pillow(path: str, as_dem: bool = False) -> Layer:
     img = Image.open(path).convert("RGB")
     arr = np.asarray(img).astype(np.uint8)
     transform = _read_world_file(Path(path))
+    # A world file only carries the geotransform, never a projection - so a
+    # georeferenced JPG/PNG (e.g. from Global Mapper/QGIS export) still needs
+    # its companion .prj checked separately, the same sidecar convention
+    # Shapefile/DXF already use.
+    crs = read_sidecar_prj(Path(path)) if transform is not None else None
     layer = Layer(
         name=Path(path).name,
         layer_type="raster",
@@ -162,7 +168,7 @@ def _load_with_pillow(path: str, as_dem: bool = False) -> Layer:
         image=arr,
         raw_data=arr,
         transform=transform,
-        crs=None,
+        crs=crs,
         width=img.width,
         height=img.height,
         extent=None,
