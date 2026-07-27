@@ -51,10 +51,6 @@ class MapCanvas(QGraphicsView):
     # Emitted by the button next to it, asking the main window to remove
     # whatever vector is currently overlaid on this canvas.
     removeOverlayRequested = pyqtSignal()
-    # Emitted when the user finishes drawing a TCS AOI (area of interest)
-    # rectangle on this canvas, as (col0, row0, col1, row1) in raster-pixel
-    # space. Only the TCS Advanced Settings dialog listens to this.
-    aoiSelected = pyqtSignal(tuple)
 
     def __init__(self, layer_manager: LayerManager, parent=None) -> None:
         super().__init__(parent)
@@ -74,13 +70,6 @@ class MapCanvas(QGraphicsView):
         self.zoom_box_mode = False
         self._zoom_box_start: Optional[QPointF] = None
         self._zoom_box_item: Optional[QGraphicsRectItem] = None
-        # TCS AOI (area of interest) rubber-band selection. Kept separate from
-        # zoom_box_mode: drawing an AOI does not change the current view, it
-        # just reports a pixel rectangle back to the TCS panel.
-        self.aoi_box_mode = False
-        self._aoi_box_start: Optional[QPointF] = None
-        self._aoi_box_preview_item: Optional[QGraphicsRectItem] = None
-        self._aoi_box_item: Optional[QGraphicsRectItem] = None
         self._auto_fit = True
         # Cache of pyproj Transformers keyed by (source_crs, dst_crs). Building a
         # Transformer is expensive (milliseconds each); without this cache the
@@ -147,36 +136,6 @@ class MapCanvas(QGraphicsView):
                 pass
         self._zoom_box_item = None
         self._zoom_box_start = None
-
-    def set_aoi_box_mode(self, enabled: bool) -> None:
-        """Enable/disable TCS AOI rubber-band drawing on this canvas."""
-        self.aoi_box_mode = enabled
-        if enabled:
-            self.setDragMode(QGraphicsView.DragMode.NoDrag)
-            self.setCursor(Qt.CursorShape.CrossCursor)
-        else:
-            self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
-            self.unsetCursor()
-            self._clear_aoi_box_preview()
-
-    def _clear_aoi_box_preview(self) -> None:
-        if self._aoi_box_preview_item is not None:
-            try:
-                self.scene_obj.removeItem(self._aoi_box_preview_item)
-            except Exception:
-                pass
-        self._aoi_box_preview_item = None
-        self._aoi_box_start = None
-
-    def clear_aoi(self) -> None:
-        """Remove any AOI rectangle currently drawn on this canvas."""
-        self._clear_aoi_box_preview()
-        if self._aoi_box_item is not None:
-            try:
-                self.scene_obj.removeItem(self._aoi_box_item)
-            except Exception:
-                pass
-        self._aoi_box_item = None
 
     def redraw(self) -> None:
         self.scene_obj.clear()
@@ -275,15 +234,10 @@ class MapCanvas(QGraphicsView):
             self._zoom_box_start = self.mapToScene(event.pos())
             event.accept()
             return
-        if self.aoi_box_mode and event.button() == Qt.MouseButton.LeftButton:
-            self._clear_aoi_box_preview()
-            self._aoi_box_start = self.mapToScene(event.pos())
-            event.accept()
-            return
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802 - Qt method
-        if not self.zoom_box_mode and not self.aoi_box_mode:
+        if not self.zoom_box_mode:
             super().mouseMoveEvent(event)
         scene_pos = self.mapToScene(event.pos())
         info = self._scene_info(scene_pos)
@@ -300,18 +254,6 @@ class MapCanvas(QGraphicsView):
             self._zoom_box_item.setBrush(QBrush(QColor(250, 204, 21, 35)))
             self._zoom_box_item.setZValue(250)
             self.scene_obj.addItem(self._zoom_box_item)
-        if self.aoi_box_mode and self._aoi_box_start is not None:
-            if self._aoi_box_preview_item is not None:
-                try:
-                    self.scene_obj.removeItem(self._aoi_box_preview_item)
-                except Exception:
-                    pass
-            rect = QRectF(self._aoi_box_start, scene_pos).normalized()
-            self._aoi_box_preview_item = QGraphicsRectItem(rect)
-            self._aoi_box_preview_item.setPen(QPen(QColor("#22D3EE"), 3, Qt.PenStyle.DashLine))
-            self._aoi_box_preview_item.setBrush(QBrush(QColor(34, 211, 238, 35)))
-            self._aoi_box_preview_item.setZValue(250)
-            self.scene_obj.addItem(self._aoi_box_preview_item)
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802 - Qt method
         if self.zoom_box_mode and event.button() == Qt.MouseButton.LeftButton:
@@ -323,22 +265,6 @@ class MapCanvas(QGraphicsView):
                     self.fitInView(rect, Qt.AspectRatioMode.KeepAspectRatio)
                     self.viewChanged.emit()
             self._clear_zoom_box_preview()
-            event.accept()
-            return
-
-        if self.aoi_box_mode and event.button() == Qt.MouseButton.LeftButton:
-            end_pos = self.mapToScene(event.pos())
-            if self._aoi_box_start is not None:
-                rect = QRectF(self._aoi_box_start, end_pos).normalized()
-                if rect.width() > 2 and rect.height() > 2:
-                    self.clear_aoi()
-                    self._aoi_box_item = QGraphicsRectItem(rect)
-                    self._aoi_box_item.setPen(QPen(QColor("#22D3EE"), 3, Qt.PenStyle.DashLine))
-                    self._aoi_box_item.setZValue(251)
-                    self.scene_obj.addItem(self._aoi_box_item)
-                    self.aoiSelected.emit((int(rect.left()), int(rect.top()), int(rect.right()), int(rect.bottom())))
-            self._clear_aoi_box_preview()
-            self.set_aoi_box_mode(False)
             event.accept()
             return
 

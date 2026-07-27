@@ -5,10 +5,10 @@ Aplikasi desktop (Windows) untuk membuka data raster/vector sekaligus menghitung
 Fitur viewer: Open Raster, Open Vector, Open DEM (raster elevation), Open ECW (via GDAL runtime jika tersedia), Export Raster, Export Vector, Reset / Data Extents, Zoom Box, Window Link, Metadata / Properties (menu View), MDI window (minimize/maximize/close), status bar Lat/Lon, dan popup promosi PT Terramitra Citra Persada.
 
 Fitur analysis (menu **Analysis** / grup toolbar **Analysis**):
-- **TCS Panel** - deteksi/hitung pohon sawit otomatis dari raster (pilih raster, pilih model, Run Counting). AOI full extent / bounding box / boundary blok, threshold confidence & IoU, tiling, dan penyimpanan hasil sebagai layer vector (GeoJSON/Shapefile).
+- **TCS Panel** - deteksi/hitung pohon sawit otomatis dari raster (pilih raster, atur tingkat keyakinan, Run Counting). Selalu memproses seluruh raster (full extent); hasil berupa layer vector titik (satu titik per pohon) yang bisa disimpan/diexport (GeoJSON/Shapefile).
 - **Clear All** - bersihkan semua layer dan jendela.
 
-Model deteksi memakai YOLO (`models/*.pt`) bila `ultralytics` + `torch` terpasang; tanpa keduanya, TCS tetap berjalan penuh memakai placeholder detector bawaan.
+Model deteksi bawaan (`models/*.onnx`) berjalan lewat `onnxruntime` (CPU-only, ringan) - selalu tersedia begitu dependency ter-install, tanpa perlu setup tambahan. Jika model tidak ditemukan, TCS tetap berjalan memakai placeholder detector bawaan.
 
 ## Setup environment (sekali saja)
 
@@ -16,8 +16,6 @@ Model deteksi memakai YOLO (`models/*.pt`) bila `ultralytics` + `torch` terpasan
 python -m venv .venv
 .venv\Scripts\python -m pip install -r requirements.txt pyinstaller
 ```
-
-Untuk memakai model YOLO terlatih: `.venv\Scripts\python -m pip install ultralytics torch`.
 
 ## Menjalankan dan build
 

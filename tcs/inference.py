@@ -6,8 +6,9 @@ framework, only on ``detect_tile``. Two backends are provided:
 - ``PlaceholderTreeDetector``: a dependency-free heuristic so the full TCS
   pipeline (tiling -> detect -> NMS -> points -> layer) is runnable and
   demoable before a trained model exists.
-- ``YoloTreeDetector``: loads a real Ultralytics YOLO (v5/v8) model from a
-  ``.pt`` weight file. Swap in another detector (Faster R-CNN, etc.) by
+- ``OnnxTreeDetector``: runs TCS's bundled detection model (ONNX format) via
+  onnxruntime (CPU, no PyTorch/large ML framework required at runtime, so the
+  installed app works without any extra install). Swap in another detector by
   adding another backend class with the same ``detect_tile`` signature.
 """
 from __future__ import annotations
@@ -19,7 +20,7 @@ from typing import List, Optional
 
 import numpy as np
 
-from .config import DEFAULT_CROWN_RADIUS_PX, DEFAULT_CROWN_SPACING_PX
+from .config import DEFAULT_CONFIDENCE, DEFAULT_CROWN_RADIUS_PX, DEFAULT_CROWN_SPACING_PX, DEFAULT_IOU
 
 try:
     from rasterio.features import shapes as rasterio_shapes
@@ -105,7 +106,7 @@ class PlaceholderTreeDetector(TreeDetector):
     merged canopies still yield roughly one point per tree. This exercises the
     full TCS pipeline end-to-end (tiling -> NMS -> georeferenced points ->
     counts) well before a real trained weight file is available. Replace with
-    YoloTreeDetector once one is.
+    OnnxTreeDetector once one is.
     """
 
     def __init__(self, crown_radius_px: float = DEFAULT_CROWN_RADIUS_PX, crown_spacing_px: float = DEFAULT_CROWN_SPACING_PX) -> None:
@@ -230,61 +231,152 @@ class PlaceholderTreeDetector(TreeDetector):
         return detections
 
 
-class YoloTreeDetector(TreeDetector):
-    """Ultralytics YOLO (v5/v8) inference backend. Requires a trained .pt weight file.
+def _nms_xyxy(boxes: np.ndarray, scores: np.ndarray, iou_threshold: float) -> np.ndarray:
+    """Greedy IoU-based Non-Maximum Suppression on plain arrays (not the
+    ``Detection`` dataclass, so this can be reused inside a single tile's
+    decode step without importing ``postprocess`` - that module already
+    imports from this one, and doing it the other way round would be a
+    circular import). Returns indices of kept boxes, highest score first.
+    """
+    if boxes.shape[0] == 0:
+        return np.empty((0,), dtype=np.int64)
+    x1, y1, x2, y2 = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
+    areas = np.clip(x2 - x1, 0, None) * np.clip(y2 - y1, 0, None)
+    order = scores.argsort()[::-1]
 
-    ``imgsz`` must match the resolution the weight file was actually trained
-    at (not the tile's raw pixel size) - the canopy-to-frame scale the model
-    learned depends on how much the training images were downscaled to reach
-    that imgsz, and inference needs to reproduce the same downscaling ratio.
-    TCS's bundled model (see training/train.py) was trained on whole source
+    keep: List[int] = []
+    while order.size > 0:
+        i = order[0]
+        keep.append(int(i))
+        if order.size == 1:
+            break
+        rest = order[1:]
+        xx1 = np.maximum(x1[i], x1[rest])
+        yy1 = np.maximum(y1[i], y1[rest])
+        xx2 = np.minimum(x2[i], x2[rest])
+        yy2 = np.minimum(y2[i], y2[rest])
+        inter = np.clip(xx2 - xx1, 0, None) * np.clip(yy2 - yy1, 0, None)
+        union = areas[i] + areas[rest] - inter
+        iou = np.where(union > 0, inter / union, 0.0)
+        order = rest[iou <= iou_threshold]
+    return np.array(keep, dtype=np.int64)
+
+
+class OnnxTreeDetector(TreeDetector):
+    """Runs TCS's bundled detection model (single-class, ONNX format) via
+    onnxruntime - CPU-only, no separate ML framework install required.
+
+    ``imgsz`` must match the resolution the model was actually trained/
+    exported at (not the tile's raw pixel size) - the canopy-to-frame scale
+    the model learned depends on how much the training images were
+    downscaled to reach that imgsz, and inference needs to reproduce the
+    same downscaling ratio. TCS's bundled model was trained on whole source
     images (not pre-tiled) resized to imgsz=1280, so the "Tile size" panel
     setting should stay large enough to cover the whole raster when using
     that model, letting this fixed imgsz do the necessary downscaling itself.
+
+    ``confidence``/``iou`` are applied right here (per tile) as well as later
+    across tiles (see ``tcs/postprocess.nms``) - filtering early keeps the
+    number of raw detections collected per tile small, since a dense
+    detection grid can otherwise report many overlapping boxes for the same
+    tree even after confidence filtering alone.
     """
 
-    def __init__(self, weights_path: str, imgsz: int = 1280) -> None:
+    def __init__(
+        self,
+        model_path: str,
+        imgsz: int = 1280,
+        confidence: float = DEFAULT_CONFIDENCE,
+        iou: float = DEFAULT_IOU,
+    ) -> None:
         try:
-            from ultralytics import YOLO
+            import onnxruntime as ort
         except Exception as exc:  # pragma: no cover
             import traceback
             try:
                 import tempfile
                 from pathlib import Path
 
-                Path(tempfile.gettempdir(), "tcs_yolo_import_error.log").write_text(
+                Path(tempfile.gettempdir(), "tcs_detector_import_error.log").write_text(
                     traceback.format_exc(), encoding="utf-8"
                 )
             except Exception:
                 pass
-            raise RuntimeError("Model YOLO butuh 'pip install ultralytics torch'.") from exc
+            raise RuntimeError("Modul deteksi TCS butuh 'pip install onnxruntime'.") from exc
 
         try:
-            self.model = YOLO(weights_path)
+            self.session = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
         except Exception as exc:
-            raise RuntimeError(f"Gagal memuat model YOLO dari '{weights_path}': {exc}") from exc
+            raise RuntimeError(f"Gagal memuat model deteksi TCS dari '{model_path}': {exc}") from exc
         self.imgsz = imgsz
+        self.confidence = confidence
+        self.iou = iou
+        self._input_name = self.session.get_inputs()[0].name
+        self._output_name = self.session.get_outputs()[0].name
 
     def detect_tile(self, tile_rgb: np.ndarray) -> List[Detection]:
-        results = self.model.predict(source=tile_rgb, imgsz=self.imgsz, verbose=False)
-        detections: List[Detection] = []
-        for result in results:
-            boxes = getattr(result, "boxes", None)
-            if boxes is None:
-                continue
-            xyxy = boxes.xyxy.cpu().numpy()
-            confs = boxes.conf.cpu().numpy()
-            for (x1, y1, x2, y2), conf in zip(xyxy, confs):
-                detections.append(Detection(float(x1), float(y1), float(x2), float(y2), float(conf)))
-        return detections
+        from PIL import Image
+
+        height, width = tile_rgb.shape[:2]
+        resample = getattr(getattr(Image, "Resampling", Image), "BILINEAR")
+        resized = np.asarray(
+            Image.fromarray(tile_rgb).resize((self.imgsz, self.imgsz), resample)
+        )
+        blob = resized.astype(np.float32) / 255.0
+        blob = np.transpose(blob, (2, 0, 1))[None, ...]  # HWC -> NCHW
+
+        raw = self.session.run([self._output_name], {self._input_name: blob})[0]
+        # Expected shape (1, 4+nc, N) for this single-class ("sawit") model,
+        # i.e. (1, 5, N): 4 box coords (xywh, centre-based, imgsz-pixel
+        # space) + 1 already-sigmoided class score. Some exporters emit
+        # (1, N, 5) instead - detect via which axis equals 5 (4 + nc=1) and
+        # transpose so downstream code always sees (N, 5).
+        arr = raw[0]
+        if arr.shape[0] == 5 and arr.shape[1] != 5:
+            arr = arr.T
+        boxes_xywh = arr[:, :4]
+        scores = arr[:, 4]
+
+        mask = scores >= self.confidence
+        if not mask.any():
+            return []
+        boxes_xywh = boxes_xywh[mask]
+        scores = scores[mask]
+
+        # abs() on w/h: raw regression output can occasionally go slightly
+        # negative on low-confidence/noisy predictions, which would otherwise
+        # flip x1>x2 or y1>y2 and throw off NMS area/IoU math downstream.
+        cx, cy = boxes_xywh[:, 0], boxes_xywh[:, 1]
+        w, h = np.abs(boxes_xywh[:, 2]), np.abs(boxes_xywh[:, 3])
+        boxes_xyxy = np.stack([cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2], axis=1)
+
+        keep = _nms_xyxy(boxes_xyxy, scores, self.iou)
+        boxes_xyxy = boxes_xyxy[keep]
+        scores = scores[keep]
+
+        # Scale from imgsz-space back to this tile's own pixel space (a
+        # plain per-axis resize, since extract_tile() always hands us a
+        # square tile_size x tile_size array - no letterbox padding offset
+        # to undo).
+        scale_x = width / self.imgsz
+        scale_y = height / self.imgsz
+        boxes_xyxy[:, [0, 2]] *= scale_x
+        boxes_xyxy[:, [1, 3]] *= scale_y
+
+        return [
+            Detection(x1=float(x1), y1=float(y1), x2=float(x2), y2=float(y2), confidence=float(conf))
+            for (x1, y1, x2, y2), conf in zip(boxes_xyxy, scores)
+        ]
 
 
 def build_detector(
     weights_path: Optional[str] = None,
+    confidence: float = DEFAULT_CONFIDENCE,
+    iou: float = DEFAULT_IOU,
     crown_radius_px: float = DEFAULT_CROWN_RADIUS_PX,
     crown_spacing_px: float = DEFAULT_CROWN_SPACING_PX,
 ) -> TreeDetector:
-    """Select a backend: YOLO when a weight file is given, placeholder otherwise."""
+    """Select a backend: the bundled detection model when a model file is given, placeholder otherwise."""
     if weights_path:
-        return YoloTreeDetector(weights_path)
+        return OnnxTreeDetector(weights_path, confidence=confidence, iou=iou)
     return PlaceholderTreeDetector(crown_radius_px=crown_radius_px, crown_spacing_px=crown_spacing_px)

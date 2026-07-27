@@ -42,7 +42,7 @@ from PyQt6.QtWidgets import (
 )
 
 from .export_tools import export_enhancement
-from .format_converter import convert_vector
+from .format_converter import convert_vector, write_geojson, write_kml, write_shapefile
 from .layer_manager import Layer, LayerManager
 from .map_canvas import MapCanvas
 from .promo_dialog import TerramitraPromotionDialog
@@ -868,7 +868,32 @@ class TCSMainWindow(QMainWindow):
         default = str(resource_path("output", "exports", f"{Path(layer.name).stem}.geojson"))
         path, _ = QFileDialog.getSaveFileName(self, "Export Vector", default, "GeoJSON (*.geojson);;KML (*.kml);;Shapefile (*.shp)")
         if path:
-            self._safe_run(lambda: QMessageBox.information(self, "Export selesai", f"Vector tersimpan:\n{convert_vector(layer.path, path)}"), "Export vector...")
+            self._safe_run(lambda: QMessageBox.information(self, "Export selesai", f"Vector tersimpan:\n{self._export_vector_layer(layer, path)}"), "Export vector...")
+
+    def _export_vector_layer(self, layer: Layer, output_path: str) -> str:
+        """Export a vector layer to output_path.
+
+        Layers backed by a source file (``layer.path``) are converted through
+        ``convert_vector`` (reads the original file). In-memory layers such as
+        TCS counting results have no source file (``path is None``); those are
+        written straight from ``layer.features`` using the same format writers,
+        so results can be exported before ever being saved to disk.
+        """
+        out_ext = Path(output_path).suffix.lower()
+        if out_ext not in {".shp", ".kml", ".geojson", ".json"}:
+            raise RuntimeError(f"Output vector belum didukung: {out_ext}")
+        if layer.path:
+            return convert_vector(layer.path, output_path)
+        if not layer.features:
+            raise RuntimeError("Layer vector ini tidak memiliki geometry/fitur yang bisa diekspor.")
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        if out_ext == ".kml":
+            write_kml(output_path, layer.features, source_crs=layer.crs)
+        elif out_ext in {".geojson", ".json"}:
+            write_geojson(output_path, layer.features, source_crs=layer.crs)
+        elif out_ext == ".shp":
+            write_shapefile(output_path, layer.features, source_crs=layer.crs)
+        return output_path
 
     # ---------- Metadata and click status ----------
     def show_metadata_dialog(self) -> None:

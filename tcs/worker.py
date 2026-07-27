@@ -1,4 +1,4 @@
-"""Background TCS pipeline: tiling -> detect -> NMS -> points -> block counts.
+"""Background TCS pipeline: tiling -> detect -> NMS -> points.
 
 Runs on a QThread so heavy inference never blocks the viewer's UI thread.
 Emits progress/log messages the panel renders in its progress bar and log,
@@ -7,20 +7,20 @@ and reports errors as readable messages instead of raising into the UI.
 from __future__ import annotations
 
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, List, Optional
 
 import numpy as np
 from PyQt6.QtCore import QThread, pyqtSignal
 
-from .inference import Detection, PlaceholderTreeDetector, YoloTreeDetector, build_detector
-from .postprocess import assign_blocks, detections_to_box_features, nms
+from .inference import Detection, OnnxTreeDetector, PlaceholderTreeDetector, build_detector
+from .postprocess import detections_to_point_features, nms
 from .tiling import compute_tile_windows, extract_tile
 
 
 class TCSWorker(QThread):
     progress = pyqtSignal(int, str)
     log = pyqtSignal(str)
-    finished_ok = pyqtSignal(list, dict)
+    finished_ok = pyqtSignal(list)
     failed = pyqtSignal(str)
 
     def __init__(
@@ -35,7 +35,6 @@ class TCSWorker(QThread):
         overlap: int,
         crown_radius_px: float,
         crown_spacing_px: float,
-        boundary_layer: Optional[Any] = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -49,16 +48,15 @@ class TCSWorker(QThread):
         self.overlap = overlap
         self.crown_radius_px = crown_radius_px
         self.crown_spacing_px = crown_spacing_px
-        self.boundary_layer = boundary_layer
 
     def run(self) -> None:  # noqa: D102 - QThread entry point
         try:
-            features, block_counts = self._run_pipeline()
-            self.finished_ok.emit(features, block_counts)
+            features = self._run_pipeline()
+            self.finished_ok.emit(features)
         except Exception as exc:
             self.failed.emit(str(exc).strip() or repr(exc))
 
-    def _run_pipeline(self) -> tuple[List[dict], Dict[str, int]]:
+    def _run_pipeline(self) -> List[dict]:
         if self.transform is None:
             raise RuntimeError("Raster harus sudah ter-georeferensi (mis. GeoTIFF dengan CRS).")
 
@@ -67,6 +65,8 @@ class TCSWorker(QThread):
         try:
             detector = build_detector(
                 weights_path=self.weights_path,
+                confidence=self.confidence,
+                iou=self.iou,
                 crown_radius_px=self.crown_radius_px,
                 crown_spacing_px=self.crown_spacing_px,
             )
@@ -77,7 +77,7 @@ class TCSWorker(QThread):
         windows = compute_tile_windows(width, height, self.tile_size, self.overlap)
         t1 = time.time()
         self.log.emit(f"Tiling: {len(windows)} tile disiapkan ({t1 - t0:.2f}s)")
-        if isinstance(detector, YoloTreeDetector) and len(windows) > 1 and self.tile_size < max(width, height):
+        if isinstance(detector, OnnxTreeDetector) and len(windows) > 1 and self.tile_size < max(width, height):
             self.log.emit("Peringatan: naikkan Tile size >= ukuran piksel raster agar skala kanopi cocok.")
 
         raw_detections: List[Detection] = []
@@ -100,7 +100,7 @@ class TCSWorker(QThread):
         if isinstance(detector, PlaceholderTreeDetector):
             total_blobs = detector.normal_blob_count + detector.merged_blob_count
             if total_blobs > 0 and detector.merged_blob_count / total_blobs > 0.3:
-                self.log.emit("Peringatan: perbesar 'Radius kanopi' (Advanced) agar pohon tidak terhitung ganda.")
+                self.log.emit("Peringatan: banyak pohon berdempetan, jumlah bisa kurang akurat.")
 
         self.progress.emit(75, "Filter confidence + NMS lintas-tile...")
         filtered = [d for d in raw_detections if d.confidence >= self.confidence]
@@ -108,12 +108,9 @@ class TCSWorker(QThread):
         t3 = time.time()
         self.log.emit(f"NMS: {t3 - t2:.2f}s, {len(survivors)} pohon setelah filter confidence + NMS")
 
-        self.progress.emit(90, "Konversi ke poligon geografis...")
-        features = detections_to_box_features(survivors, self.transform)
-        block_counts: Dict[str, int] = {}
-        if self.boundary_layer is not None:
-            features, block_counts = assign_blocks(features, self.source_crs, self.boundary_layer)
+        self.progress.emit(90, "Konversi ke titik geografis...")
+        features = detections_to_point_features(survivors, self.transform)
         t4 = time.time()
-        self.log.emit(f"Konversi ke poligon: {t4 - t3:.2f}s, total {t4 - t0:.2f}s, {len(features)} pohon terdeteksi")
+        self.log.emit(f"Konversi ke titik: {t4 - t3:.2f}s, total {t4 - t0:.2f}s, {len(features)} pohon terdeteksi")
         self.progress.emit(100, "Selesai")
-        return features, block_counts
+        return features
