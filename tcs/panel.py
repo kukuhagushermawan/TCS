@@ -10,10 +10,12 @@ to configure them. Accuracy metrics are intentionally not surfaced in this
 UI - they belong in the training report, not in front of an end user running
 a count.
 
-Talks to the host window only through the small helper methods
-``app.ui_main.TCSMainWindow.add_tcs_result_layer`` and
-``remove_layer_by_id``, so this popup can be removed/disabled without
-touching the core viewer.
+The result is always shown as a point overlay on top of the raster it was
+counted from (one point per detected tree) - a plain counting tool, nothing
+more. Talks to the host window only through the small helper methods on
+``app.ui_main.TCSMainWindow`` (``overlay_tcs_result_on_source``,
+``remove_tcs_overlay``, ``add_tcs_result_layer``, ``remove_layer_by_id``), so
+this popup can be removed/disabled without touching the core viewer.
 """
 from __future__ import annotations
 
@@ -29,7 +31,6 @@ from PyQt6.QtWidgets import (
     QFileDialog,
     QGroupBox,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
     QMessageBox,
     QProgressBar,
@@ -38,7 +39,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
 )
 
-from app.coordinate_tools import pixel_to_world
+from app.coordinate_tools import is_identity_transform
 from app.layer_manager import Layer
 from app.resources import resource_path
 
@@ -50,8 +51,6 @@ from .config import (
     DEFAULT_TILE_OVERLAP,
     DEFAULT_TILE_SIZE,
 )
-from .gap_analysis import is_boundary_layer
-from .gap_worker import GapAnalysisWorker
 from .model_registry import discover_models
 from .postprocess import feature_bounds, save_features
 from .worker import TCSWorker
@@ -70,10 +69,13 @@ class TCSPanel(QDialog):
         self.resize(400, 400)
         self.setMinimumSize(360, 340)
         self._worker: Optional[TCSWorker] = None
-        self._gap_worker: Optional[GapAnalysisWorker] = None
         self._pending_layer: Optional[Layer] = None
         self._pending_source_layer: Optional[Layer] = None
         self._pending_features: Optional[list] = None
+        # Results normally land straight on their source raster; this is only
+        # False when that raster's window had already been closed, so Discard
+        # knows which teardown to use.
+        self._result_in_overlay = False
         self._build_ui()
         self._apply_style()
 
@@ -114,6 +116,7 @@ class TCSPanel(QDialog):
         conf_hint.setObjectName("StatusLabel")
         conf_hint.setWordWrap(True)
         input_layout.addWidget(conf_hint)
+
         layout.addWidget(input_group)
 
         action_row = QHBoxLayout()
@@ -148,13 +151,6 @@ class TCSPanel(QDialog):
         result_row.addWidget(self.discard_btn)
         result_layout.addLayout(result_row)
 
-        # Optional extra step, off by default - does not run unless clicked,
-        # so the plain counting flow above (pick raster, Run Counting,
-        # Simpan/Discard) is completely unaffected by this button existing.
-        self.gap_btn = QPushButton("Cari Lahan Kosong...")
-        self.gap_btn.clicked.connect(self._find_empty_land)
-        result_layout.addWidget(self.gap_btn)
-
         self._set_result_controls_visible(False)
         layout.addWidget(result_group)
 
@@ -175,6 +171,7 @@ class TCSPanel(QDialog):
             }
             QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; }
             QLabel#TotalLabel { font-weight: 700; font-size: 14pt; color: #111827; }
+            QLabel#StatLabel { color: #374151; font-size: 10pt; }
             QLabel#StatusLabel { color: #6B7280; font-size: 8.5pt; }
             QPushButton { padding: 6px 10px; border: 1px solid #C9CED6; border-radius: 4px; background: #FFFFFF; }
             QPushButton:hover { background: #EEF2F6; }
@@ -195,7 +192,30 @@ class TCSPanel(QDialog):
             if idx >= 0:
                 self.raster_combo.setCurrentIndex(idx)
 
+    @staticmethod
+    def _in_pixel_space(layer: Optional[Layer]) -> bool:
+        """True when a raster's coordinates are raw image pixels rather than
+        real-world ground positions."""
+        if layer is None:
+            return True
+        return is_identity_transform(getattr(layer, "transform", None))
+
     # ---------- Run ----------
+    def _georeference_caveat(self, layer: Layer) -> Optional[str]:
+        """One-sentence warning when this raster has no real georeference, or
+        None when it does.
+
+        Counting itself is pure geometry and stays accurate in pixel space; what
+        a missing georeference costs is that the result's coordinates cannot be
+        used outside this app (no real-world position for GIS/field use).
+        """
+        if self._in_pixel_space(layer):
+            return (
+                "Raster tanpa georeferensi: hasil tetap akurat, tapi koordinat "
+                "titiknya tidak bisa dipakai di GIS/lapangan."
+            )
+        return None
+
     def run_counting(self) -> None:
         if self._worker is not None and self._worker.isRunning():
             return
@@ -209,7 +229,6 @@ class TCSPanel(QDialog):
         if image is None:
             QMessageBox.warning(self, "TCS", "Raster terpilih tidak memiliki data citra yang bisa diproses.")
             return
-
         height, width = image.shape[:2]
 
         # AOI is always the full raster - no bounding-box/block-boundary
@@ -269,14 +288,16 @@ class TCSPanel(QDialog):
     def _on_finished(self, features: list) -> None:
         self._set_running(False)
         if not features:
-            QMessageBox.information(self, "TCS", "Tidak ada pohon terdeteksi pada threshold saat ini.")
+            QMessageBox.information(
+                self, "TCS", "Tidak ada pohon terdeteksi pada tingkat keyakinan ini."
+            )
             return
         source_layer = self._pending_source_layer
         timestamp = datetime.now().strftime("%H%M%S")
 
         # Plain point vector output (one point per detected tree) instead of
-        # boxes burned into the raster - opens as its own new vector
-        # layer/document, same as any other vector file in this viewer.
+        # boxes burned into the raster, so the result stays ordinary vector data
+        # that exports like any other layer.
         preview_layer = Layer(
             name=f"TCS_hasil_{timestamp} - {len(features)} pohon",
             layer_type="vector",
@@ -289,116 +310,52 @@ class TCSPanel(QDialog):
         )
         self._pending_layer = preview_layer
         self._pending_features = features
-        self.main_window.add_tcs_result_layer(preview_layer)
+
+        # Shown straight on top of the raster it was counted from, so the
+        # points can be read against the imagery itself. Falling back to a
+        # standalone window only if that raster's window was closed mid-run,
+        # so a result is never left displayed nowhere.
+        self._result_in_overlay = bool(
+            source_layer is not None
+            and self.main_window.overlay_tcs_result_on_source(preview_layer, source_layer)
+        )
+        if not self._result_in_overlay:
+            self.main_window.add_tcs_result_layer(preview_layer)
+
         self._set_result_controls_visible(True)
         self.total_label.setText(f"Jumlah Pohon: {len(features)}")
-        self.status_label.setText(f"Selesai: {len(features)} pohon ditampilkan sebagai layer baru.")
+        self.status_label.setText(
+            "Selesai, hasil ditampilkan di atas raster."
+            if self._result_in_overlay
+            else "Selesai, hasil dibuka di jendela sendiri karena jendela raster tertutup."
+        )
 
     def _on_failed(self, message: str) -> None:
         self._set_running(False)
-        QMessageBox.critical(self, "TCS Error", message)
-
-    # ---------- Cari Lahan Kosong (optional, off by default) ----------
-    def _find_empty_land(self) -> None:
-        if not self._pending_features:
-            return
-        if self._gap_worker is not None and self._gap_worker.isRunning():
-            return
-
-        # Boundary polygon is optional - if the user has one loaded, offer
-        # it; otherwise skip straight to the convex-hull fallback without
-        # forcing a dialog with nothing useful to choose from.
-        candidates = [lyr for lyr in self.main_window.layer_manager.layers if is_boundary_layer(lyr)]
-        boundary_layer = None
-        if candidates:
-            no_boundary_option = "Tidak ada (gunakan convex hull otomatis)"
-            options = [no_boundary_option] + [lyr.name for lyr in candidates]
-            choice, ok = QInputDialog.getItem(
-                self, "Cari Lahan Kosong", "Pilih polygon batas lahan (opsional):", options, 0, False
-            )
-            if not ok:
-                return
-            if choice != no_boundary_option:
-                boundary_layer = next((lyr for lyr in candidates if lyr.name == choice), None)
-
-        tree_crs = self._pending_layer.crs if self._pending_layer else None
-        raster_bounds = self._source_raster_world_bounds()
-        self.gap_btn.setEnabled(False)
-        self.status_label.setText("Mencari lahan kosong...")
-
-        self._gap_worker = GapAnalysisWorker(
-            tree_features=self._pending_features,
-            tree_crs=tree_crs,
-            boundary_layer=boundary_layer,
-            raster_bounds=raster_bounds,
-        )
-        self._gap_worker.progress.connect(self._on_gap_progress)
-        self._gap_worker.finished_ok.connect(self._on_gap_finished)
-        self._gap_worker.failed.connect(self._on_gap_failed)
-        self._gap_worker.start()
-
-    def _on_gap_progress(self, percent: int, message: str) -> None:
-        self.progress_bar.setValue(percent)
-        self.progress_bar.setFormat(f"{percent}% - {message}")
-
-    def _source_raster_world_bounds(self):
-        """Real-world bounding box (minx, miny, maxx, maxy) of the raster
-        that was used for counting - lets gap analysis drop candidates too
-        close to the captured image's own edge (see
-        gap_analysis.filter_within_raster_margin)."""
-        layer = self._pending_source_layer
-        if layer is None or layer.transform is None or not layer.width or not layer.height:
-            return None
-        corners = [
-            pixel_to_world(layer.transform, 0, 0),
-            pixel_to_world(layer.transform, layer.width, 0),
-            pixel_to_world(layer.transform, layer.width, layer.height),
-            pixel_to_world(layer.transform, 0, layer.height),
-        ]
-        xs = [c[0] for c in corners]
-        ys = [c[1] for c in corners]
-        return (min(xs), min(ys), max(xs), max(ys))
-
-    def _on_gap_finished(self, features: list, spacing: float, boundary_source: str) -> None:
-        self.gap_btn.setEnabled(True)
-        if not features:
-            QMessageBox.information(
-                self, "TCS", f"Tidak ditemukan lahan kosong (estimasi jarak tanam {spacing:.1f})."
-            )
-            return
-        if self._pending_layer is None or self._pending_features is None:
-            # The counting result was saved/discarded while this ran in the
-            # background - nothing left to attach the gap points to.
-            return
-
-        # Append into the SAME vector layer/window the tree points already
-        # opened in, rather than creating a second layer - the empty-slot
-        # crosses show up as an addition to that one result, not a
-        # separate document. save_features() (Simpan) then also carries
-        # both tree and gap points together.
-        self._pending_features = self._pending_features + features
-        self._pending_layer.features = self._pending_features
-        self._pending_layer.bounds = feature_bounds(self._pending_layer.features)
-        self._pending_layer.metadata["tcs_gap_total"] = len(features)
-        self._pending_layer.metadata["spacing"] = spacing
-        self.main_window.refresh_layer_window(self._pending_layer.id)
-        self.status_label.setText(
-            f"Ditemukan {len(features)} titik lahan kosong (estimasi jarak tanam {spacing:.1f}, {boundary_source})."
-        )
-
-    def _on_gap_failed(self, message: str) -> None:
-        self.gap_btn.setEnabled(True)
         QMessageBox.critical(self, "TCS Error", message)
 
     # ---------- Save / discard ----------
     def _set_result_controls_visible(self, visible: bool) -> None:
         self.save_btn.setVisible(visible)
         self.discard_btn.setVisible(visible)
-        self.gap_btn.setVisible(visible)
 
     def _save_result(self) -> None:
         if self._pending_layer is None:
             return
+        # Warned before writing, not after: a .geojson/.shp of pixel coordinates
+        # looks like ordinary spatial data but lands near the origin in any GIS,
+        # so the user should know that before the file exists.
+        if self._in_pixel_space(self._pending_source_layer):
+            answer = QMessageBox.question(
+                self,
+                "TCS - Koordinat piksel",
+                "Titik yang disimpan berkoordinat piksel, jadi posisinya tidak akan "
+                "cocok bila dibuka di QGIS/ArcGIS.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
         default = str(resource_path("output", "tcs", "tcs_hasil.geojson"))
         path, _ = QFileDialog.getSaveFileName(
             self, "Simpan hasil TCS", default, "GeoJSON (*.geojson);;Shapefile (*.shp)"
@@ -420,9 +377,17 @@ class TCSPanel(QDialog):
     def _discard_result(self) -> None:
         if self._pending_layer is None:
             return
-        self.main_window.remove_layer_by_id(self._pending_layer.id)
+        # Which teardown is correct depends on how the result is currently
+        # shown: remove_layer_by_id closes the whole window holding the layer,
+        # which would close the user's raster window if the result were
+        # overlaid on it.
+        if self._result_in_overlay:
+            self.main_window.remove_tcs_overlay(self._pending_layer.id)
+        else:
+            self.main_window.remove_layer_by_id(self._pending_layer.id)
         self._pending_layer = None
         self._pending_features = None
+        self._result_in_overlay = False
         self._set_result_controls_visible(False)
-        self.status_label.setText("Hasil TCS dibuang (discard).")
+        self.status_label.setText("Hasil TCS dibuang.")
         self.total_label.setText("Jumlah Pohon: -")

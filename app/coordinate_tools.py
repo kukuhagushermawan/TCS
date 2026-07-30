@@ -71,6 +71,62 @@ def is_geographic_crs(crs: Any) -> bool:
         return False
 
 
+PIXEL_UNIT_LABEL = "piksel (raster belum bergeoreferensi)"
+DEGREE_UNIT_LABEL = "derajat (CRS geografis, bukan satuan jarak)"
+
+
+def is_identity_transform(transform: Any) -> bool:
+    """True when a geotransform carries no real georeferencing.
+
+    GDAL/rasterio hand back this identity transform - 1 unit per pixel, origin
+    at (0,0) - for an image with no georeferencing at all (a plain JPG/PNG
+    without a world file) instead of failing. Coordinates derived from it are
+    therefore raw pixel indices, not ground positions.
+    """
+    if transform is None:
+        return True
+    try:
+        values = (transform.a, transform.b, transform.c, transform.d, transform.e, transform.f)
+    except Exception:
+        return False
+    return values == (1.0, 0.0, 0.0, 0.0, 1.0, 0.0)
+
+
+def linear_unit_label(crs: Any, transform: Any = None) -> str:
+    """Human-readable unit for distances measured in a layer's own coordinates.
+
+    Any distance computed straight from layer coordinates (e.g. TCS's estimated
+    planting spacing) silently inherits whatever unit that layer's CRS uses, so
+    a bare number is ambiguous: metres for a projected CRS, degrees for a
+    geographic one, and plain image pixels when the source had no georeferencing
+    at all. Pass ``transform`` as well to also catch a file that declares a CRS
+    but carries only an identity geotransform.
+    """
+    if transform is not None and is_identity_transform(transform):
+        return PIXEL_UNIT_LABEL
+    if crs is None:
+        return PIXEL_UNIT_LABEL
+    if CRS is None:
+        return "unit CRS"
+    try:
+        crs_obj = CRS.from_user_input(crs)
+    except Exception:
+        return "unit CRS"
+    if crs_obj.is_geographic:
+        return DEGREE_UNIT_LABEL
+    try:
+        unit = (crs_obj.axis_info[0].unit_name or "").lower()
+    except Exception:
+        unit = ""
+    if "metre" in unit or "meter" in unit:
+        return "meter"
+    if "foot" in unit or "feet" in unit:
+        return "kaki"
+    if "degree" in unit:
+        return DEGREE_UNIT_LABEL
+    return unit or "unit CRS"
+
+
 def to_latlon(x: float, y: float, source_crs: Any) -> Tuple[Optional[float], Optional[float]]:
     """Return latitude, longitude from source CRS.
 

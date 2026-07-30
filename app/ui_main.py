@@ -369,6 +369,65 @@ class TCSMainWindow(QMainWindow):
                 return
         self.layer_manager.remove_layer(layer_id)
 
+    def _canvas_showing_layer(self, layer_id: str) -> MapCanvas | None:
+        for canvas in self._popup_canvases:
+            if any(lyr.id == layer_id for lyr in canvas.layer_manager.layers):
+                return canvas
+        return None
+
+    def has_window_for_layer(self, layer_id: str) -> bool:
+        """Whether any open window still shows ``layer_id`` - lets the TCS
+        panel check that a source raster's window is still open *before* it
+        tears down the result's own window to move it there."""
+        return self._canvas_showing_layer(layer_id) is not None
+
+    def overlay_tcs_result_on_source(self, result_layer: Layer, source_layer: Layer) -> bool:
+        """Overlay a TCS result onto the very raster window it was counted from.
+
+        Deliberately matched by source-raster identity rather than by
+        ``_crs_match``: the result's points were produced from that raster's own
+        transform, so their georeference is identical by construction. Identity
+        is also the *stricter* test - a CRS match would happily accept a
+        different raster that merely shares the same CRS while covering another
+        area - and it keeps working for imagery carrying no CRS at all, where
+        ``_crs_match`` deliberately refuses.
+
+        Returns False when that raster's window is no longer open, so the caller
+        can keep showing the result where it already is instead of losing it.
+        """
+        canvas = self._canvas_showing_layer(source_layer.id)
+        if canvas is None:
+            return False
+        if not any(lyr.id == result_layer.id for lyr in canvas.layer_manager.layers):
+            canvas.layer_manager.add_layer(result_layer)
+        if self.layer_manager.get(result_layer.id) is None:
+            self.layer_manager.add_layer(result_layer)
+        canvas.layer_manager.set_active(result_layer.id)
+        self.layer_manager.set_active(result_layer.id)
+        canvas.redraw()
+        self._update_subwindow_title(canvas)
+        self.active_canvas = canvas
+        self.update_layer_status()
+        return True
+
+    def remove_tcs_overlay(self, result_layer_id: str) -> bool:
+        """Take a TCS result back off the raster window it was overlaid on,
+        leaving that raster window itself open.
+
+        Not the same as ``remove_layer_by_id``, which closes the whole window
+        holding the layer - doing that here would close the user's raster
+        window along with the overlay.
+        """
+        canvas = self._canvas_showing_layer(result_layer_id)
+        if canvas is None or canvas.layer_manager.active_base_raster() is None:
+            return False
+        canvas.layer_manager.remove_layer(result_layer_id)
+        self.layer_manager.remove_layer(result_layer_id)
+        canvas.redraw()
+        self._update_subwindow_title(canvas)
+        self.update_layer_status()
+        return True
+
     def eventFilter(self, obj, event):  # noqa: N802 - Qt method
         if event.type() == QEvent.Type.WindowActivate and obj in self._dialog_canvases:
             canvases = self._dialog_canvases.get(obj, [])

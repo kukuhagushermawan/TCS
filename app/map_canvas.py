@@ -413,80 +413,48 @@ class MapCanvas(QGraphicsView):
                 self._add_geometry_to_group(group, gtype, pix_coords, self._vector_pen)
         return group
 
-    # TCS overlay colours: green = detected tree, red = recommended empty
-    # planting slot - distinct from VECTOR_COLOR so a glance tells them apart
-    # from any other (always red) vector file drawn on the same window.
-    _TCS_TREE_COLOR = "#16A34A"
-    _TCS_GAP_COLOR = "#DC2626"
-
-    @staticmethod
-    def _is_tcs_gap_feature(feat: Dict[str, Any]) -> bool:
-        """A TCS result layer can hold both tree points (from Run Counting)
-        and, once Cari Lahan Kosong runs, empty-slot points appended into
-        the very same layer - so which marker to draw is decided per
-        feature (gap_analysis.points_to_features always sets "slot_id";
-        postprocess.detections_to_point_features never does), not per layer."""
-        return "slot_id" in (feat.get("properties") or {})
+    # TCS overlay colour: bold red = detected tree - highly visible on top of
+    # green palm-canopy imagery, distinct from any other vector overlay.
+    _TCS_TREE_COLOR = "#DC2626"
 
     def _draw_tcs_style_layer(self, layer: Layer, base: Layer) -> QGraphicsItemGroup:
-        """TCS-specific overlay rendering: a green circle per detected tree or
-        a red cross per recommended empty-planting point, each numbered -
+        """TCS-specific overlay rendering: a bold red circle per detected tree -
         completely separate from ``_draw_vector_layer``/``_add_geometry_to_group``,
         which stay unchanged for every other vector file."""
         group = QGraphicsItemGroup()
+        pen = QPen(QColor(self._TCS_TREE_COLOR), 3)
         for feat in layer.features:
             geom = feat.get("geometry")
             if not geom or geom.get("type") != "Point":
                 continue
-            is_gap = self._is_tcs_gap_feature(feat)
-            color = QColor(self._TCS_GAP_COLOR if is_gap else self._TCS_TREE_COLOR)
-            pen = QPen(color, 2)
             x, y = geom["coordinates"][:2]
             px, py = self._world_to_base_pixel(x, y, layer.crs, base)
-            if is_gap:
-                self._add_cross_marker(group, px, py, pen)
-            else:
-                self._add_circle_marker(group, px, py, pen)
+            self._add_circle_marker(group, px, py, pen)
         return group
 
-    def _add_circle_marker(self, group: QGraphicsItemGroup, x: float, y: float, pen: QPen, radius: float = 5.0) -> None:
+    def _add_circle_marker(self, group: QGraphicsItemGroup, x: float, y: float, pen: QPen, radius: float = 26.0) -> None:
         ellipse = QGraphicsEllipseItem(x - radius, y - radius, radius * 2, radius * 2)
         ellipse.setPen(pen)
         fill = QColor(pen.color())
-        fill.setAlpha(90)
+        fill.setAlpha(255)
         ellipse.setBrush(fill)
         group.addToGroup(ellipse)
 
-    def _add_cross_marker(self, group: QGraphicsItemGroup, x: float, y: float, pen: QPen, size: float = 6.0) -> None:
-        path = QPainterPath()
-        path.moveTo(x - size, y - size)
-        path.lineTo(x + size, y + size)
-        path.moveTo(x - size, y + size)
-        path.lineTo(x + size, y - size)
-        item = QGraphicsPathItem(path)
-        item.setPen(pen)
-        group.addToGroup(item)
-
     def _draw_tcs_style_layer_no_base(self, layer: Layer, bounds: Tuple[float, float, float, float]) -> QGraphicsItemGroup:
-        """Same green-circle/red-cross+label rendering as
-        ``_draw_tcs_style_layer``, but mapped into the synthetic vector-only
-        coordinate space (``_vector_world_to_scene``) instead of a raster
-        base's pixel space - TCS result windows never carry a raster base
-        of their own, so this is the path they actually render through."""
+        """Same red-circle rendering as ``_draw_tcs_style_layer``, but
+        mapped into the synthetic vector-only coordinate space
+        (``_vector_world_to_scene``) instead of a raster base's pixel space -
+        TCS result windows never carry a raster base of their own, so this is
+        the path they actually render through."""
         group = QGraphicsItemGroup()
+        pen = QPen(QColor(self._TCS_TREE_COLOR), 3)
         for feat in layer.features:
             geom = feat.get("geometry")
             if not geom or geom.get("type") != "Point":
                 continue
-            is_gap = self._is_tcs_gap_feature(feat)
-            color = QColor(self._TCS_GAP_COLOR if is_gap else self._TCS_TREE_COLOR)
-            pen = QPen(color, 2)
             x, y = geom["coordinates"][:2]
             px, py = self._vector_world_to_scene(x, y, bounds)
-            if is_gap:
-                self._add_cross_marker(group, px, py, pen)
-            else:
-                self._add_circle_marker(group, px, py, pen)
+            self._add_circle_marker(group, px, py, pen)
         return group
 
     def _add_geometry_to_group(self, group: QGraphicsItemGroup, gtype: str, pix_coords: List[Tuple[float, float]], pen: QPen) -> None:

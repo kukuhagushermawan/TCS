@@ -16,11 +16,3 @@ DEFAULT_IOU = 0.25
 # imagery's ground sample distance when no trained model is available yet.
 DEFAULT_CROWN_RADIUS_PX = 18
 DEFAULT_CROWN_SPACING_PX = 40
-
-# Used by the optional "Cari Lahan Kosong" (find empty planting land)
-# feature: a candidate grid slot counts as "already occupied" (not empty)
-# when an existing tree sits within GAP_TOLERANCE_RATIO * estimated_spacing
-# of it. 0.5 means within half the ideal spacing, which tolerates the normal
-# jitter of real plantations without flagging slots right next to a tree
-# that is merely slightly off-grid as empty.
-GAP_TOLERANCE_RATIO = 0.5
