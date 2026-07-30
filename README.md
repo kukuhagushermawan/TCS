@@ -32,7 +32,7 @@ Aplikasi desktop (Windows) untuk membuka data raster/vector sekaligus menghitung
 
 | Fitur | Keterangan |
 |---|---|
-| **TCS Panel -> Run Counting** | Mendeteksi dan menghitung pohon sawit secara otomatis dari raster yang dipilih. Selalu memproses seluruh raster (full extent); satu-satunya kontrol yang diekspos ke pengguna adalah slider tingkat keyakinan (*confidence*). Hasilnya dibuka sebagai **jendela vector baru** berisi satu titik per pohon terdeteksi (lingkaran hijau). |
+| **TCS Panel -> Run Counting** | Mendeteksi dan menghitung pohon sawit secara otomatis dari raster yang dipilih. Selalu memproses seluruh raster (full extent); satu-satunya kontrol yang diekspos ke pengguna adalah slider tingkat keyakinan (*confidence*). Hasilnya akan otomatis di-*overlay* (ditumpuk) di atas raster sumbernya berupa titik penanda berwarna merah solid per pohon. |
 | **Cari Lahan Kosong...** | Langkah opsional setelah Run Counting (tidak wajib, tidak mengubah hasil counting). Mempelajari pola baris tanam dari titik pohon yang sudah terdeteksi (bukan grid tetap), lalu menandai posisi kosong yang seharusnya ada pohon di sepanjang baris tersebut. Hasilnya ditambahkan sebagai silang merah **ke jendela hasil counting yang sama** (bukan jendela/layer baru). |
 | **Clear All** | Membersihkan semua layer dan jendela yang terbuka. |
 
@@ -163,7 +163,7 @@ flowchart LR
     C --> D["tcs.inference\nDeteksi per tile (model ONNX / CPU)"]
     D --> E["Filter confidence\n+ NMS lintas-tile"]
     E --> F["tcs.postprocess\nTitik tengah box -> koordinat geografis"]
-    F --> G["Jendela vector baru\n(titik hijau bernomor per pohon)"]
+    F --> G["Ditumpuk (overlay) ke raster\n(titik merah per pohon)"]
     G --> H["Export GeoJSON / Shapefile\n(opsional)"]
 ```
 
@@ -173,7 +173,7 @@ Detail tiap tahap:
 2. **Deteksi per tile** - setiap tile diproses oleh model deteksi bawaan (format ONNX, dijalankan lewat `onnxruntime`) yang menghasilkan kandidat kotak deteksi beserta skor keyakinannya. Jika file model tidak tersedia, dipakai *placeholder detector* berbasis indeks vegetasi (Excess Green Index + threshold otomatis) sebagai gantinya.
 3. **Filter + NMS lintas-tile** - kandidat dengan skor di bawah ambang confidence dibuang; sisanya disaring dengan *Non-Maximum Suppression* lintas-tile agar satu pohon yang terdeteksi di dua tile bertetangga (area overlap) tidak dihitung dua kali.
 4. **Konversi ke titik geografis** - titik tengah setiap kotak deteksi yang tersisa dikonversi dari koordinat piksel ke koordinat dunia nyata memakai geotransform raster, menghasilkan satu titik per pohon.
-5. Hasilnya dibuka sebagai **jendela vector baru** (bukan ditumpuk ke raster) berisi marker lingkaran hijau, dan siap diekspor.
+5. Hasilnya akan **langsung ditumpuk (overlay)** di atas jendela raster sumbernya berisi marker titik merah padat yang jelas terlihat, dan siap diekspor.
 
 ### 3. Alur opsional: Cari Lahan Kosong
 
