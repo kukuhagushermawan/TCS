@@ -96,26 +96,7 @@ class TCSPanel(QDialog):
         raster_row.addWidget(refresh_btn)
         input_layout.addLayout(raster_row)
 
-        # Model deteksi bawaan dipakai otomatis (tidak ada pemilihan/unggah
-        # model), jadi user langsung mengatur tingkat keyakinan: ambang
-        # seberapa yakin model bahwa sebuah objek adalah pohon sawit sebelum
-        # ikut dihitung.
-        input_layout.addWidget(QLabel("Tingkat keyakinan (seberapa yakin objek adalah pohon sawit):"))
-        conf_row = QHBoxLayout()
-        self.confidence_slider = QSlider(Qt.Orientation.Horizontal)
-        self.confidence_slider.setRange(1, 99)
-        self.confidence_slider.setValue(int(DEFAULT_CONFIDENCE * 100))
-        self.confidence_value_label = QLabel(f"{DEFAULT_CONFIDENCE:.2f}")
-        self.confidence_slider.valueChanged.connect(
-            lambda v: self.confidence_value_label.setText(f"{v / 100:.2f}")
-        )
-        conf_row.addWidget(self.confidence_slider, 1)
-        conf_row.addWidget(self.confidence_value_label)
-        input_layout.addLayout(conf_row)
-        conf_hint = QLabel("Makin tinggi makin ketat: hanya objek yang sangat diyakini sawit yang dihitung.")
-        conf_hint.setObjectName("StatusLabel")
-        conf_hint.setWordWrap(True)
-        input_layout.addWidget(conf_hint)
+
         layout.addWidget(input_group)
 
         action_row = QHBoxLayout()
@@ -141,6 +122,16 @@ class TCSPanel(QDialog):
         self.total_label.setObjectName("TotalLabel")
         result_layout.addWidget(self.total_label)
 
+        self.export_btn = QPushButton("Export Vector (GeoJSON/SHP)")
+        self.export_btn.setEnabled(False)
+        self.export_btn.clicked.connect(self.export_result)
+        result_layout.addWidget(self.export_btn)
+
+        self.export_img_btn = QPushButton("Export Gambar (JPG/PNG)")
+        self.export_img_btn.setEnabled(False)
+        self.export_img_btn.clicked.connect(self.export_image_result)
+        result_layout.addWidget(self.export_img_btn)
+
 
         layout.addWidget(result_group)
 
@@ -154,6 +145,7 @@ class TCSPanel(QDialog):
     def _apply_style(self) -> None:
         self.setStyleSheet(
             """
+            QDialog, QLabel { color: #111827; }
             QDialog { background: #F7F8FA; }
             QGroupBox {
                 font-weight: 600; color: #374151; border: 1px solid #D8DCE3;
@@ -162,11 +154,11 @@ class TCSPanel(QDialog):
             QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; }
             QLabel#TotalLabel { font-weight: 700; font-size: 14pt; color: #111827; }
             QLabel#StatusLabel { color: #6B7280; font-size: 8.5pt; }
-            QPushButton { padding: 6px 10px; border: 1px solid #C9CED6; border-radius: 4px; background: #FFFFFF; }
+            QPushButton { color: #374151; padding: 6px 10px; border: 1px solid #C9CED6; border-radius: 4px; background: #FFFFFF; }
             QPushButton:hover { background: #EEF2F6; }
             QPushButton#PrimaryButton { background: #2563EB; color: white; font-weight: 600; border: none; }
             QPushButton#PrimaryButton:hover { background: #1D4ED8; }
-            QComboBox, QLineEdit { padding: 3px; border: 1px solid #C9CED6; border-radius: 4px; background: #FFFFFF; }
+            QComboBox, QLineEdit, QComboBox QAbstractItemView { color: #111827; padding: 3px; border: 1px solid #C9CED6; border-radius: 4px; background: #FFFFFF; }
             """
         )
 
@@ -226,7 +218,7 @@ class TCSPanel(QDialog):
             transform=layer.transform,
             source_crs=layer.crs,
             weights_path=weights_path,
-            confidence=self.confidence_slider.value() / 100.0,
+            confidence=0.3,
             iou=DEFAULT_IOU,
             tile_size=tile_size,
             overlap=DEFAULT_TILE_OVERLAP,
@@ -242,6 +234,9 @@ class TCSPanel(QDialog):
     def _set_running(self, running: bool) -> None:
         self.run_btn.setEnabled(not running)
         self.run_btn.setText("Memproses..." if running else "Run Counting")
+        if running:
+            self.export_btn.setEnabled(False)
+            self.export_img_btn.setEnabled(False)
         self.progress_bar.setValue(0)
         self.progress_bar.setFormat("%p%")
 
@@ -294,11 +289,63 @@ class TCSPanel(QDialog):
             if self._result_in_overlay
             else f"Selesai: {len(features)} pohon ditampilkan sebagai layer baru."
         )
+        self.export_btn.setEnabled(True)
+        self.export_img_btn.setEnabled(True)
 
     def _on_failed(self, message: str) -> None:
         self._set_running(False)
         QMessageBox.critical(self, "TCS Error", message)
 
+    def export_result(self) -> None:
+        if not self._pending_features or not self._pending_source_layer:
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Simpan Hasil TCS",
+            "",
+            "GeoJSON (*.geojson);;Shapefile (*.shp)"
+        )
+        if not path:
+            return
+        
+        try:
+            save_features(path, self._pending_features, self._pending_source_layer.crs)
+            QMessageBox.information(self, "TCS", f"Berhasil menyimpan hasil ke:\n{path}")
+        except Exception as e:
+            QMessageBox.critical(self, "TCS Error", f"Gagal menyimpan:\n{e}")
 
+    def export_image_result(self) -> None:
+        if not self._pending_source_layer:
+            return
+            
+        target_canvas = None
+        for canvases in self.main_window._dialog_canvases.values():
+            for canvas in canvases:
+                if any(lyr.id == self._pending_source_layer.id for lyr in canvas.layer_manager.layers):
+                    target_canvas = canvas
+                    break
+            if target_canvas:
+                break
+                
+        if not target_canvas:
+            if any(lyr.id == self._pending_source_layer.id for lyr in self.main_window.canvas.layer_manager.layers):
+                target_canvas = self.main_window.canvas
 
+        if not target_canvas:
+            QMessageBox.warning(self, "TCS", "Tidak dapat menemukan tampilan gambar raster untuk di-export.")
+            return
 
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Simpan Gambar Hasil TCS",
+            "",
+            "JPEG (*.jpg *.jpeg);;PNG (*.png)"
+        )
+        if not path:
+            return
+            
+        try:
+            target_canvas.export_to_image(path)
+            QMessageBox.information(self, "TCS", f"Berhasil menyimpan gambar hasil ke:\n{path}")
+        except Exception as e:
+            QMessageBox.critical(self, "TCS Error", f"Gagal menyimpan gambar:\n{e}")

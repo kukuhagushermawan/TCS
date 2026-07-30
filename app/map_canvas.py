@@ -557,6 +557,22 @@ class MapCanvas(QGraphicsView):
         y = maxy - (float(sy) - pad) / scale
         return float(x), float(y)
 
+    def export_to_image(self, path: str) -> None:
+        """Export the entire scene (raster + overlays) as an image file."""
+        rect = self.sceneRect()
+        if rect.isNull() or rect.width() == 0 or rect.height() == 0:
+            return
+        
+        img = QImage(int(rect.width()), int(rect.height()), QImage.Format.Format_ARGB32)
+        img.fill(Qt.GlobalColor.transparent)
+        
+        painter = QPainter(img)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        self.scene_obj.render(painter, QRectF(img.rect()), rect)
+        painter.end()
+        
+        img.save(path)
+
 def numpy_rgb_to_qpixmap(image: np.ndarray) -> QPixmap:
     arr = np.ascontiguousarray(image)
     if arr.ndim == 2:
