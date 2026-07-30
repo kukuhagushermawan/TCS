@@ -57,8 +57,7 @@ class TCSWorker(QThread):
             self.failed.emit(str(exc).strip() or repr(exc))
 
     def _run_pipeline(self) -> List[dict]:
-        if self.transform is None:
-            raise RuntimeError("Raster harus sudah ter-georeferensi (mis. GeoTIFF dengan CRS).")
+        # Allow processing even if transform is None (e.g. for non-georeferenced images like JPG/PNG)
 
         t0 = time.time()
         self.log.emit("Mulai TCS (Tree Counting Sawit)...")

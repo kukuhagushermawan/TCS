@@ -369,6 +369,37 @@ class TCSMainWindow(QMainWindow):
                 return
         self.layer_manager.remove_layer(layer_id)
 
+    def has_window_for_layer(self, layer_id: str) -> bool:
+        """Return True if there is an open document window showing ``layer_id``."""
+        for canvases in self._dialog_canvases.values():
+            for c in canvases:
+                if any(lyr.id == layer_id for lyr in c.layer_manager.layers):
+                    return True
+        return False
+
+    def overlay_tcs_result_on_source(self, result_layer: Layer, source_layer: Layer) -> bool:
+        """Add ``result_layer`` into the same document window that shows
+        ``source_layer`` so the TCS points are drawn on top of the raster.
+        Returns True on success, False if the source window was not found."""
+        for canvases in self._dialog_canvases.values():
+            for canvas in canvases:
+                if any(lyr.id == source_layer.id for lyr in canvas.layer_manager.layers):
+                    canvas.layer_manager.add_layer(result_layer)
+                    canvas.redraw()
+                    return True
+        return False
+
+    def remove_tcs_overlay(self, layer_id: str) -> bool:
+        """Remove a TCS overlay layer from whichever raster window it was
+        added to (without closing that window). Returns True if found."""
+        for canvases in self._dialog_canvases.values():
+            for canvas in canvases:
+                if any(lyr.id == layer_id for lyr in canvas.layer_manager.layers):
+                    canvas.layer_manager.remove_layer(layer_id)
+                    canvas.redraw()
+                    return True
+        return False
+
     def eventFilter(self, obj, event):  # noqa: N802 - Qt method
         if event.type() == QEvent.Type.WindowActivate and obj in self._dialog_canvases:
             canvases = self._dialog_canvases.get(obj, [])
