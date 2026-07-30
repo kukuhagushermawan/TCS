@@ -571,7 +571,9 @@ class MapCanvas(QGraphicsView):
         self.scene_obj.render(painter, QRectF(img.rect()), rect)
         painter.end()
         
-        img.save(path)
+        success = img.save(path)
+        if not success:
+            raise RuntimeError(f"Gagal menyimpan gambar ke {path}. Pastikan folder ada dan format file didukung.")
 
 def numpy_rgb_to_qpixmap(image: np.ndarray) -> QPixmap:
     arr = np.ascontiguousarray(image)

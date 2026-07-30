@@ -214,8 +214,18 @@ def _render_dem(dem: np.ndarray) -> np.ndarray:
 def save_array_as_geotiff(output_path: str, image: np.ndarray, reference_layer: Layer) -> None:
     if rasterio is None:
         raise RuntimeError("rasterio/GDAL belum tersedia untuk export GeoTIFF")
+    
+    from pathlib import Path
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    
     img = to_uint8_rgb(image)
     profile = reference_layer.profile.copy() if reference_layer.profile else {}
+    
+    # Strip options that often conflict when converting from 1-band/float to 3-band uint8
+    for key in ['photometric', 'colorinterp', 'nodata', 'colormap', 
+                'blockxsize', 'blockysize', 'tiled', 'compress', 'interleave']:
+        profile.pop(key, None)
+        
     profile.update({
         "driver": "GTiff",
         "height": img.shape[0],
@@ -224,6 +234,29 @@ def save_array_as_geotiff(output_path: str, image: np.ndarray, reference_layer: 
         "dtype": "uint8",
         "transform": reference_layer.transform,
         "crs": reference_layer.crs,
+        "compress": "lzw",
+        "tiled": True,
+        "blockxsize": 256,
+        "blockysize": 256,
+        "predictor": 2,
+        "bigtiff": "IF_SAFER"
     })
-    with rasterio.open(output_path, "w", **profile) as dst:
-        dst.write(np.moveaxis(img, -1, 0))
+    
+    try:
+        with rasterio.open(output_path, "w", **profile) as dst:
+            dst.write(np.moveaxis(img, -1, 0))
+    except Exception as e:
+        # Fallback to minimal profile if writing still fails (e.g., due to tiling constraints on tiny images)
+        minimal_profile = {
+            "driver": "GTiff",
+            "height": img.shape[0],
+            "width": img.shape[1],
+            "count": 3,
+            "dtype": "uint8",
+            "transform": reference_layer.transform,
+            "crs": reference_layer.crs,
+            "compress": "lzw",
+            "predictor": 2,
+        }
+        with rasterio.open(output_path, "w", **minimal_profile) as dst:
+            dst.write(np.moveaxis(img, -1, 0))
